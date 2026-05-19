@@ -77,7 +77,8 @@ fn main() {
     let target    = parse_hex32(&args[2]);
     let start: u64 = args[3].parse().unwrap_or(0);
     let threads = if args.len() > 4 {
-        args[4].parse().unwrap_or_else(|_| num_cpus())
+        let t: usize = args[4].parse().unwrap_or_else(|_| num_cpus());
+        if t == 0 { num_cpus() } else { t }
     } else { num_cpus() };
 
     eprintln!("nonce-miner: threads={} start={}", threads, start);
