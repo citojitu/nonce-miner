@@ -1,0 +1,21 @@
+# SECRETS — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp

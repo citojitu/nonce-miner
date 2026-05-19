@@ -1,0 +1,15 @@
+{
+  "name": "nonce-miner",
+  "version": "0.1.0",
+  "description": "CPU miner for NONCE ($NONCE) — ERC-8004 Proof-of-Work token on Base mainnet",
+  "main": "miner.js",
+  "scripts": {
+    "build": "cd . && cargo build --release",
+    "start": "node miner.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2"
+  },
+  "license": "MIT"
+}
