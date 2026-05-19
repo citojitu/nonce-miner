@@ -20,9 +20,22 @@ const CHAIN_ID     = 8453n;
 const EPOCH_BLOCKS = 100n;
 const RPC          = process.env.RPC_URL || "https://mainnet.base.org";
 const PK           = process.env.PRIVATE_KEY;
-const TG_TOKEN     = process.env.TG_BOT_TOKEN || "";
-const TG_CHAT      = process.env.TG_CHAT_ID  || "";
 const THREADS      = process.env.MINER_THREADS || "0"; // 0 = auto-detect
+const TG_TOKEN     = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT      = process.env.TELEGRAM_CHAT_ID;
+
+async function tg(text) {
+  if (!TG_TOKEN || !TG_CHAT) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: "Markdown", disable_web_page_preview: true }),
+    });
+  } catch (e) {
+    console.log(`[tg err] ${e.message}`);
+  }
+}
 
 if (!PK) { console.error("PRIVATE_KEY env required (set in .env)"); process.exit(1); }
 if (!/^0x[0-9a-fA-F]{64}$/.test(PK)) { console.error("PRIVATE_KEY format invalid"); process.exit(1); }
@@ -38,41 +51,15 @@ const provider = new ethers.JsonRpcProvider(RPC);
 const wallet   = new ethers.Wallet(PK, provider);
 const contract = new ethers.Contract(CONTRACT, [
   "function mine(uint256 nonce) external",
+  "function getChallenge(address) view returns (bytes32)",
   "function currentDifficulty() view returns (uint256)",
   "function totalMints() view returns (uint256)",
   "function genesisComplete() view returns (bool)",
   "function balanceOf(address) view returns (uint256)",
 ], wallet);
 
-
-function notifyTG(text) {
-  if (!TG_TOKEN || !TG_CHAT) return Promise.resolve();
-  const https = require("https");
-  const body = JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: "HTML", disable_web_page_preview: true });
-  return new Promise((resolve) => {
-    const req = https.request({
-      hostname: "api.telegram.org",
-      path: `/bot${TG_TOKEN}/sendMessage`,
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-      timeout: 5000,
-    }, (res) => { res.on("data", () => {}); res.on("end", () => resolve()); });
-    req.on("timeout", () => { req.destroy(); resolve(); });
-    req.on("error", () => resolve());
-    req.write(body); req.end();
-  });
-}
-
-function makeChallenge(miner, epoch) {
-  const enc = ethers.AbiCoder.defaultAbiCoder().encode(
-    ["uint256","address","address","uint256"],
-    [CHAIN_ID, CONTRACT, miner, epoch]
-  );
-  return ethers.keccak256(enc);
-}
-
 let currentChild = null;
-let currentEpoch = null;
+let currentChallenge = null;
 let busy = false;
 
 function killChild() {
@@ -115,7 +102,6 @@ async function onFound(nonce) {
   busy = true;
   console.log(`[hit] nonce=${nonce}`);
   killChild();
-  notifyTG(`🎯 <b>NONCE hit</b>\nnonce: <code>${nonce}</code>\nminer: <code>${wallet.address}</code>`);
   try {
     const fee = await provider.getFeeData();
     const tip = ethers.parseUnits("0.01", "gwei");
@@ -124,23 +110,23 @@ async function onFound(nonce) {
       maxFeePerGas: maxFee, maxPriorityFeePerGas: tip, gasLimit: 250000n,
     });
     console.log(`[tx] ${tx.hash}`);
-    notifyTG(`📡 <b>tx sent</b>\n<a href="https://basescan.org/tx/${tx.hash}">${tx.hash.slice(0,10)}…${tx.hash.slice(-6)}</a>`);
+    tg(`⛏️ *NONCE tx submitted*\nnonce: \`${nonce}\`\ntx: [${tx.hash}](https://basescan.org/tx/${tx.hash})`);
     const r = await tx.wait();
     if (r.status === 1) {
-      const bal = await contract.balanceOf(wallet.address);
+      const bal = await contract.balanceOf(wallet.address, { blockTag: r.blockNumber });
+      const fee = ethers.formatEther(r.gasUsed * r.gasPrice);
       const balFmt = ethers.formatUnits(bal, 18);
-      const feeFmt = ethers.formatEther(r.gasUsed * r.gasPrice);
-      console.log(`[✅ mined] block ${r.blockNumber}, fee ${feeFmt} ETH`);
+      console.log(`[✅ mined] block ${r.blockNumber}, fee ${fee} ETH`);
       console.log(`[balance] ${balFmt} NONCE`);
-      notifyTG(`✅ <b>MINED</b>\nblock: ${r.blockNumber}\nfee: ${feeFmt} ETH\nbalance: <b>${balFmt} NONCE</b>\n<a href="https://basescan.org/tx/${r.hash}">tx</a>`);
+      tg(`✅ *NONCE mined!*\nblock: ${r.blockNumber}\nfee: ${fee} ETH\nbalance: *${balFmt}* NONCE\ntx: [${tx.hash}](https://basescan.org/tx/${tx.hash})`);
     } else {
       console.log(`[❌ revert] block ${r.blockNumber}`);
-      notifyTG(`❌ <b>revert</b>\nblock: ${r.blockNumber}\n<a href="https://basescan.org/tx/${r.hash}">tx</a>`);
+      tg(`❌ *NONCE tx reverted*\nblock: ${r.blockNumber}\ntx: [${tx.hash}](https://basescan.org/tx/${tx.hash})`);
     }
   } catch (e) {
     const msg = e.shortMessage || e.message;
     console.log(`[submit err]`, msg);
-    notifyTG(`⚠️ submit error: <code>${msg.toString().slice(0,200)}</code>`);
+    tg(`⚠️ *NONCE submit error*\nnonce: \`${nonce}\`\n${msg}`);
   }
   busy = false;
   await refresh();
@@ -148,18 +134,19 @@ async function onFound(nonce) {
 
 async function refresh() {
   try {
-    const block = await provider.getBlockNumber();
-    const epoch = BigInt(block) / EPOCH_BLOCKS;
-    const difficulty = await contract.currentDifficulty();
-    const totalMints = await contract.totalMints();
+    const [block, challenge, difficulty, totalMints] = await Promise.all([
+      provider.getBlockNumber(),
+      contract.getChallenge(wallet.address),
+      contract.currentDifficulty(),
+      contract.totalMints(),
+    ]);
     const target = "0x" + difficulty.toString(16).padStart(64, "0");
-    const challenge = makeChallenge(wallet.address, epoch);
 
-    if (epoch !== currentEpoch) {
-      console.log(`[epoch ${epoch}] block ${block}, diff ${difficulty}, totalMints ${totalMints}`);
+    if (challenge !== currentChallenge) {
+      console.log(`[challenge] block ${block}, totalMints ${totalMints}`);
       console.log(`  challenge ${challenge}`);
       console.log(`  target    ${target}`);
-      currentEpoch = epoch;
+      currentChallenge = challenge;
       spawnMiner(challenge, target);
     } else if (!currentChild && !busy) {
       spawnMiner(challenge, target);
@@ -171,14 +158,13 @@ async function refresh() {
 
 (async () => {
   console.log(`miner: ${wallet.address}`);
-  notifyTG(`🚀 <b>nonce-miner online</b>\nmode: ${process.argv[1].includes("gpu") ? "GPU" : "CPU"}\nminer: <code>${wallet.address}</code>`);
   const bal = await provider.getBalance(wallet.address);
   console.log(`gas balance: ${ethers.formatEther(bal)} ETH`);
   if (bal < ethers.parseEther("0.0001")) {
     console.warn("⚠️  low ETH for gas — fund wallet on Base mainnet before mining");
   }
   await refresh();
-  setInterval(refresh, 30_000);
+  setInterval(refresh, 5_000);
 })();
 
 process.on("SIGINT", () => { killChild(); process.exit(0); });
