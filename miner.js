@@ -20,6 +20,8 @@ const CHAIN_ID     = 8453n;
 const EPOCH_BLOCKS = 100n;
 const RPC          = process.env.RPC_URL || "https://mainnet.base.org";
 const PK           = process.env.PRIVATE_KEY;
+const TG_TOKEN     = process.env.TG_BOT_TOKEN || "";
+const TG_CHAT      = process.env.TG_CHAT_ID  || "";
 const THREADS      = process.env.MINER_THREADS || "0"; // 0 = auto-detect
 
 if (!PK) { console.error("PRIVATE_KEY env required (set in .env)"); process.exit(1); }
@@ -41,6 +43,25 @@ const contract = new ethers.Contract(CONTRACT, [
   "function genesisComplete() view returns (bool)",
   "function balanceOf(address) view returns (uint256)",
 ], wallet);
+
+
+function notifyTG(text) {
+  if (!TG_TOKEN || !TG_CHAT) return Promise.resolve();
+  const https = require("https");
+  const body = JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: "HTML", disable_web_page_preview: true });
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: "api.telegram.org",
+      path: `/bot${TG_TOKEN}/sendMessage`,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      timeout: 5000,
+    }, (res) => { res.on("data", () => {}); res.on("end", () => resolve()); });
+    req.on("timeout", () => { req.destroy(); resolve(); });
+    req.on("error", () => resolve());
+    req.write(body); req.end();
+  });
+}
 
 function makeChallenge(miner, epoch) {
   const enc = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -94,6 +115,7 @@ async function onFound(nonce) {
   busy = true;
   console.log(`[hit] nonce=${nonce}`);
   killChild();
+  notifyTG(`🎯 <b>NONCE hit</b>\nnonce: <code>${nonce}</code>\nminer: <code>${wallet.address}</code>`);
   try {
     const fee = await provider.getFeeData();
     const tip = ethers.parseUnits("0.01", "gwei");
@@ -102,16 +124,23 @@ async function onFound(nonce) {
       maxFeePerGas: maxFee, maxPriorityFeePerGas: tip, gasLimit: 250000n,
     });
     console.log(`[tx] ${tx.hash}`);
+    notifyTG(`📡 <b>tx sent</b>\n<a href="https://basescan.org/tx/${tx.hash}">${tx.hash.slice(0,10)}…${tx.hash.slice(-6)}</a>`);
     const r = await tx.wait();
     if (r.status === 1) {
       const bal = await contract.balanceOf(wallet.address);
-      console.log(`[✅ mined] block ${r.blockNumber}, fee ${ethers.formatEther(r.gasUsed * r.gasPrice)} ETH`);
-      console.log(`[balance] ${ethers.formatUnits(bal, 18)} NONCE`);
+      const balFmt = ethers.formatUnits(bal, 18);
+      const feeFmt = ethers.formatEther(r.gasUsed * r.gasPrice);
+      console.log(`[✅ mined] block ${r.blockNumber}, fee ${feeFmt} ETH`);
+      console.log(`[balance] ${balFmt} NONCE`);
+      notifyTG(`✅ <b>MINED</b>\nblock: ${r.blockNumber}\nfee: ${feeFmt} ETH\nbalance: <b>${balFmt} NONCE</b>\n<a href="https://basescan.org/tx/${r.hash}">tx</a>`);
     } else {
       console.log(`[❌ revert] block ${r.blockNumber}`);
+      notifyTG(`❌ <b>revert</b>\nblock: ${r.blockNumber}\n<a href="https://basescan.org/tx/${r.hash}">tx</a>`);
     }
   } catch (e) {
-    console.log(`[submit err]`, e.shortMessage || e.message);
+    const msg = e.shortMessage || e.message;
+    console.log(`[submit err]`, msg);
+    notifyTG(`⚠️ submit error: <code>${msg.toString().slice(0,200)}</code>`);
   }
   busy = false;
   await refresh();
@@ -142,6 +171,7 @@ async function refresh() {
 
 (async () => {
   console.log(`miner: ${wallet.address}`);
+  notifyTG(`🚀 <b>nonce-miner online</b>\nmode: ${process.argv[1].includes("gpu") ? "GPU" : "CPU"}\nminer: <code>${wallet.address}</code>`);
   const bal = await provider.getBalance(wallet.address);
   console.log(`gas balance: ${ethers.formatEther(bal)} ETH`);
   if (bal < ethers.parseEther("0.0001")) {
